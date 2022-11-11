@@ -54,6 +54,7 @@ class VisionNetwork(TorchModelV2, nn.Module):
         # a n x (1,1) Conv2D).
         self.last_layer_is_flattened = False
         self._logits = None
+        self.model_config 
 
         layers = []
         (w, h, in_channels) = obs_space.shape
@@ -268,6 +269,8 @@ class VisionNetwork(TorchModelV2, nn.Module):
                 logits = conv_out
             return logits, state
         else:
+            if self.model_config['use_fully_conv']:
+                conv_out = torch.interpolate(conv_out, size=(input_dict["obs"].shape), model="bilinear")
             return conv_out, state
 
     @override(TorchModelV2)

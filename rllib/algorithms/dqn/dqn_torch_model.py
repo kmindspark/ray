@@ -67,6 +67,7 @@ class DQNTorchModel(TorchModelV2, nn.Module):
         self.v_min = v_min
         self.v_max = v_max
         self.sigma0 = sigma0
+        self.use_fully_conv = model_config.get("use_fully_conv")
         ins = num_outputs
 
         advantage_module = nn.Sequential()
@@ -143,7 +144,11 @@ class DQNTorchModel(TorchModelV2, nn.Module):
             (action_scores, logits, dist) if num_atoms == 1, otherwise
             (action_scores, z, support_logits_per_action, logits, dist)
         """
-        action_scores = self.advantage_module(model_out)
+        if self.use_fully_conv:
+            # flatten model output
+            model_out = model_out.view(model_out.size(0), -1)
+        else:
+            action_scores = self.advantage_module(model_out)
 
         if self.num_atoms > 1:
             # Distributional Q-learning uses a discrete support z

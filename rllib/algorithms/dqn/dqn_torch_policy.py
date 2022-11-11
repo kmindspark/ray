@@ -44,6 +44,16 @@ F = None
 if nn:
     F = nn.functional
 
+def gauss_2d_batch(width, height, sigma, U, V, normalize_dist=True, single=False):
+    if not single:
+        U.unsqueeze_(1).unsqueeze_(2)
+        V.unsqueeze_(1).unsqueeze_(2)
+    X,Y = torch.meshgrid([torch.arange(0., width), torch.arange(0., height)])
+    X,Y = torch.transpose(X, 0, 1).cuda(), torch.transpose(Y, 0, 1).cuda()
+    G=torch.exp(-((X-U.float())**2+(Y-V.float())**2)/(2.0*sigma**2))
+    if normalize_dist:
+        return (G/G.max()).double()
+    return G.double()
 
 class QLoss:
     def __init__(
@@ -61,6 +71,7 @@ class QLoss:
         v_min=-10.0,
         v_max=10.0,
         loss_fn=huber_loss,
+        weights=None
     ):
 
         if num_atoms > 1:
@@ -102,19 +113,23 @@ class QLoss:
                 # TODO: better Q stats for dist dqn
             }
         else:
-            q_tp1_best_masked = (1.0 - done_mask) * q_tp1_best
+                q_tp1_best_masked = (1.0 - done_mask) * q_tp1_best
 
-            # compute RHS of bellman equation
-            q_t_selected_target = rewards + gamma**n_step * q_tp1_best_masked
+                # compute RHS of bellman equation
+                q_t_selected_target = rewards + gamma**n_step * q_tp1_best_masked
 
-            # compute the error (potentially clipped)
-            self.td_error = q_t_selected - q_t_selected_target.detach()
-            self.loss = torch.mean(importance_weights.float() * loss_fn(self.td_error))
-            self.stats = {
-                "mean_q": torch.mean(q_t_selected),
-                "min_q": torch.min(q_t_selected),
-                "max_q": torch.max(q_t_selected),
-            }
+                # compute the error (potentially clipped)
+                if weights is None:
+                    self.td_error = q_t_selected - q_t_selected_target.detach()
+                else:
+                    self.td_error = (q_t_selected - q_t_selected_target.detach().unsqueeze(-1)) * torch.sqrt(weights)
+                self.loss = torch.mean(importance_weights.float() * loss_fn(self.td_error))
+                self.stats = {
+                    "mean_q": torch.mean(q_t_selected),
+                    "min_q": torch.min(q_t_selected),
+                    "max_q": torch.max(q_t_selected),
+                }
+                
 
 
 class ComputeTDErrorMixin:
@@ -285,18 +300,29 @@ def build_q_losses(policy: Policy, model, _, train_batch: SampleBatch) -> Tensor
         is_training=True,
     )
 
-    # Q scores for actions which we know were selected in the given state.
-    one_hot_selection = F.one_hot(
-        train_batch[SampleBatch.ACTIONS].long(), policy.action_space.n
-    )
-    q_t_selected = torch.sum(
-        torch.where(q_t > FLOAT_MIN, q_t, torch.tensor(0.0, device=q_t.device))
-        * one_hot_selection,
-        1,
-    )
-    q_logits_t_selected = torch.sum(
-        q_logits_t * torch.unsqueeze(one_hot_selection, -1), 1
-    )
+    gaussian_kernel = None
+    q_logits_t_selected = None
+    q_t_selected = torch.where(q_t > FLOAT_MIN, q_t, torch.tensor(0.0, device=q_t.device))
+    if config.get("gaussian_kernel_sigma", 0) > 0:
+        # REAL RL MODIFICATION: USE GAUSSIAN KERNEL TO SMOOTH OUT UPDATES, assume actions here are indices
+        side_length = torch.sqrt(policy.action_space.n)
+        U, V = train_batch[SampleBatch.ACTIONS].long() // side_length, train_batch[SampleBatch.ACTIONS].long() % side_length
+        # construct gaussian 
+        gaussian_kernel = gauss_2d_batch(side_length, side_length, config['gaussian_kernel_sigma'], U, V)
+    else:
+        # Q scores for actions which we know were selected in the given state.
+        one_hot_selection = F.one_hot(
+            train_batch[SampleBatch.ACTIONS].long(), policy.action_space.n
+        )
+
+        q_t_selected = torch.sum(
+            q_t_selected
+            * one_hot_selection,
+            1,
+        )
+        q_logits_t_selected = torch.sum(
+            q_logits_t * torch.unsqueeze(one_hot_selection, -1), 1
+        )
 
     # compute estimate of best possible value starting from state at t + 1
     if config["double_q"]:
@@ -357,6 +383,7 @@ def build_q_losses(policy: Policy, model, _, train_batch: SampleBatch) -> Tensor
         config["v_min"],
         config["v_max"],
         loss_fn,
+        weights=gaussian_kernel,
     )
 
     # Store values for stats function in model (tower), such that for
