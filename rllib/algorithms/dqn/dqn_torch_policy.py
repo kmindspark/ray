@@ -44,12 +44,12 @@ F = None
 if nn:
     F = nn.functional
 
-def gauss_2d_batch(width, height, sigma, U, V, normalize_dist=True, single=False):
+def gauss_2d_batch(width, height, sigma, U, V, normalize_dist=True, single=False, device="cpu"):
     if not single:
         U.unsqueeze_(1).unsqueeze_(2)
         V.unsqueeze_(1).unsqueeze_(2)
     X,Y = torch.meshgrid([torch.arange(0., width), torch.arange(0., height)])
-    X,Y = torch.transpose(X, 0, 1).cuda(), torch.transpose(Y, 0, 1).cuda()
+    X,Y = torch.transpose(X, 0, 1).to(device), torch.transpose(Y, 0, 1).to(device)
     G=torch.exp(-((X-U.float())**2+(Y-V.float())**2)/(2.0*sigma**2))
     if normalize_dist:
         return (G/G.max()).double()
@@ -308,7 +308,8 @@ def build_q_losses(policy: Policy, model, _, train_batch: SampleBatch) -> Tensor
         side_length = torch.sqrt(policy.action_space.n)
         U, V = train_batch[SampleBatch.ACTIONS].long() // side_length, train_batch[SampleBatch.ACTIONS].long() % side_length
         # construct gaussian 
-        gaussian_kernel = gauss_2d_batch(side_length, side_length, config['gaussian_kernel_sigma'], U, V)
+        gaussian_kernel = gauss_2d_batch(side_length, side_length, config['gaussian_kernel_sigma'], U, V, device=q_t.device)
+        gaussian_kernel = gaussian_kernel.view(gaussian_kernel.shape[0], -1)
     else:
         # Q scores for actions which we know were selected in the given state.
         one_hot_selection = F.one_hot(
